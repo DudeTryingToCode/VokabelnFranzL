@@ -225,6 +225,13 @@ table.mini th{background:var(--soft);font-weight:600}
         <p class="msg" id="pasteMsg" role="status"></p>
       </div>
 
+      <h2>Vokabeln vom Server laden</h2>
+      <div class="panel">
+        <p class="hint" style="margin-top:0">Liegt neben der App eine Datei vokabeln.xlsx oder vokabeln.csv (Spalten wie beim Import), holt dieser Knopf neue Vokabeln daraus. Vorhandene bleiben mit ihrem Lernfortschritt unverändert. Von Dir gelöschte Vokabeln kommen wieder, solange sie in der Datei stehen.</p>
+        <div class="form-actions"><button class="btn primary" data-act="server-import">Vokabeln laden</button></div>
+        <p class="msg" id="syncMsg" role="status"></p>
+      </div>
+
       <h2>Sprachausgabe</h2>
       <div class="panel">
         <label class="chk" for="autoSpeak" style="margin-top:0"><input type="checkbox" id="autoSpeak"> Französische Wörter automatisch vorlesen</label>
@@ -620,30 +627,50 @@ function renderPreview(){
     +'<p class="hint" style="margin:0">'+esc(s.items.slice(0,3).map(x=>x.de+' – '+x.fr).join(' · '))+(s.items.length>3?' …':'')+'</p></div>').join('')
     +'<button type="button" class="btn primary wide" data-act="do-import">Importieren</button>';
 }
+function readSheets(buf,ext,base){
+  if(['csv','tsv','txt'].includes(ext)){
+    let text=new TextDecoder('utf-8').decode(buf);
+    if(text.indexOf(String.fromCharCode(65533))>=0) text=new TextDecoder('windows-1252').decode(buf);
+    if(text.charCodeAt(0)===65279) text=text.slice(1);
+    return [{name:base,rows:parseLines(text)}];
+  }
+  if(typeof XLSX==='undefined') throw new Error('Die Excel-Bibliothek ist nicht geladen. Bitte Internetverbindung prüfen und die Seite neu öffnen.');
+  const wb=XLSX.read(buf,{type:'array'});
+  return wb.SheetNames.map(n=>({name:wb.SheetNames.length>1?n:base,rows:XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,blankrows:false,defval:''})}));
+}
+function collectLists(sheets){
+  const merged=new Map();
+  sheets.forEach(s=>groupByList(rowsToItems(s.rows),s.name).forEach(g=>{
+    const k=g.name.toLowerCase();
+    if(!merged.has(k)) merged.set(k,{name:g.name,items:[],inc:true});
+    g.items.forEach(it=>merged.get(k).items.push(it));
+  }));
+  return Array.from(merged.values()).filter(s=>s.items.length);
+}
+async function serverImport(){
+  const msg=$('#syncMsg'); say(msg,'Wird geladen …');
+  try{
+    let res=null, ext='';
+    for(const f of ['vokabeln.xlsx','vokabeln.csv']){
+      try{ const r=await fetch(f+'?t='+Date.now(),{cache:'no-store'}); if(r.ok){ res=r; ext=f.split('.').pop(); break; } }catch(e){}
+    }
+    if(!res) throw new Error('Keine Datei vokabeln.xlsx oder vokabeln.csv neben der App gefunden.');
+    const found=collectLists(readSheets(await res.arrayBuffer(),ext,'Vokabeln'));
+    if(!found.length) throw new Error('Die Datei enthält keine Vokabeln. Deutsch gehört in Spalte A, Französisch in Spalte B.');
+    let added=0,dup=0;
+    found.forEach(s=>{ const r=addWordsToList(s.name,s.items); added+=r.added; dup+=r.dup; });
+    save(); ui.card=null; refreshMore();
+    say(msg,added+' neue Vokabeln ergänzt'+(dup?(', '+dup+' bereits vorhanden'):'')+'.','good');
+  }catch(e){ say(msg,e&&e.message?e.message:'Die Datei konnte nicht geladen werden.','err'); }
+}
 async function onFile(file){
   const msg=$('#importMsg'); ui.imp=null; renderPreview();
   if(!file) return;
   const base=file.name.replace(/\.[^.]+$/,'');
   const ext=(file.name.split('.').pop()||'').toLowerCase();
   try{
-    let sheets=[];
-    const buf=await file.arrayBuffer();
-    if(['csv','tsv','txt'].includes(ext)){
-      let text=new TextDecoder('utf-8').decode(buf);
-      if(text.indexOf(String.fromCharCode(65533))>=0) text=new TextDecoder('windows-1252').decode(buf);
-      sheets=[{name:base,rows:parseLines(text)}];
-    } else {
-      if(typeof XLSX==='undefined') throw new Error('Die Excel-Bibliothek ist nicht geladen. Bitte Internetverbindung prüfen und die Seite neu öffnen.');
-      const wb=XLSX.read(buf,{type:'array'});
-      sheets=wb.SheetNames.map(n=>({name:wb.SheetNames.length>1?n:base,rows:XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,blankrows:false,defval:''})}));
-    }
-    const merged=new Map();
-    sheets.forEach(s=>groupByList(rowsToItems(s.rows),s.name).forEach(g=>{
-      const k=g.name.toLowerCase();
-      if(!merged.has(k)) merged.set(k,{name:g.name,items:[],inc:true});
-      g.items.forEach(it=>merged.get(k).items.push(it));
-    }));
-    const found=Array.from(merged.values()).filter(s=>s.items.length);
+    const sheets=readSheets(await file.arrayBuffer(),ext,base);
+    const found=collectLists(sheets);
     if(!found.length){ say(msg,'Keine Vokabeln gefunden. Deutsch gehört in Spalte A, Französisch in Spalte B.','err'); return; }
     ui.imp=found; renderPreview(); say(msg,'Bitte Namen prüfen und importieren.');
   }catch(e){ say(msg,e&&e.message?e.message:'Die Datei konnte nicht gelesen werden.','err'); }
@@ -740,6 +767,7 @@ const actions={
   }),
   'do-import':doImport,
   'paste-import':pasteImport,
+  'server-import':serverImport,
   backup:()=>{
     const ta=$('#backupText'), msg=$('#backupMsg');
     ta.value=JSON.stringify(D);
